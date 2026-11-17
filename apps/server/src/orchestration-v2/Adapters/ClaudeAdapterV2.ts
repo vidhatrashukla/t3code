@@ -4947,6 +4947,8 @@ function formatClaudeUsageLimitWait(waitMs: number): string {
 
 interface ActiveClaudeTurnContext {
   retryBudgetFailure?: OrchestrationV2ProviderFailure;
+  /** Set when Stop before paid usage stops this turn; it settles failed even if Claude finishes it. */
+  paidUsageFailure?: OrchestrationV2ProviderFailure;
   // Set when the prompt starts or a request goes out; cleared by the turn's next frame.
   unansweredRequestSince?: DateTime.Utc | undefined;
   readonly queryPolicy: ClaudeRuntimeQueryPolicy;
@@ -6475,6 +6477,43 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           yield* finalizeActiveTurnAfterQueryExit(liveQuery);
           yield* endSubagentCallsOfClosedQuery(liveQuery.nativeThreadId, "interrupted");
           yield* Deferred.succeed(liveQuery.closed, undefined);
+        });
+
+        // Stop before paid usage. The failure is recorded before the stop is sent, so a result
+        // that lands first still settles failed; a user Stop that came first keeps its outcome.
+        const guardExtraUsage = Effect.fn("ClaudeAdapterV2.guardExtraUsage")(function* (
+          context: ActiveClaudeTurnContext,
+          info: {
+            readonly status?: string | undefined;
+            readonly overageStatus?: string | undefined;
+            readonly isUsingOverage?: boolean | undefined;
+            readonly overageInUse?: boolean | undefined;
+            readonly rateLimitType?: string | undefined;
+            readonly resetsAt?: unknown;
+          },
+        ) {
+          if (!adapterOptions.settings.stopBeforePaidUsage) return;
+          const usesExtraUsage = claudeUsesExtraUsage(info);
+          const resetAt = claudeUsageLimitResetAt(info.resetsAt);
+          yield* Ref.set(
+            extraUsageInUse,
+            usesExtraUsage ? { rateLimitType: info.rateLimitType, resetAt } : null,
+          );
+          if (
+            !usesExtraUsage ||
+            context.paidUsageFailure !== undefined ||
+            (yield* Ref.get(interruptedTurns)).has(context.providerTurnId)
+          )
+            return;
+          const failure = paidUsageFailure(resetAt);
+          context.paidUsageFailure = failure;
+          yield* Effect.forkDetach(
+            failStalledTurn(
+              context,
+              failure,
+              Ref.get(activeTurn).pipe(Effect.map((current) => current === context)),
+            ),
+          );
         });
 
         const rememberProviderThread =
@@ -9213,10 +9252,14 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         }) {
           // A turn stopped by the retry budget settles as failed with the retry's error.
           const retryBudgetFailure = requested.context.retryBudgetFailure;
+          const paidUsage = requested.context.paidUsageFailure;
           const input =
-            requested.status === "interrupted" && retryBudgetFailure !== undefined
-              ? { ...requested, status: "failed" as const, failure: retryBudgetFailure }
-              : requested;
+            paidUsage !== undefined &&
+            (requested.status === "completed" || requested.status === "interrupted")
+              ? { ...requested, status: "failed" as const, failure: paidUsage }
+              : requested.status === "interrupted" && retryBudgetFailure !== undefined
+                ? { ...requested, status: "failed" as const, failure: retryBudgetFailure }
+                : requested;
           input.context.steersClosed = true;
           yield* reasoningDeltas.flushTurn(input.context.nativeTurnId);
           if (input.status === "completed") {
@@ -10487,23 +10530,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               });
               return;
             }
-            if (adapterOptions.settings.stopBeforePaidUsage) {
-              const usesExtraUsage = claudeUsesExtraUsage(rateLimitInfo);
-              const resetAt = claudeUsageLimitResetAt(rateLimitInfo.resetsAt);
-              yield* Ref.set(
-                extraUsageInUse,
-                usesExtraUsage ? { rateLimitType: rateLimitInfo.rateLimitType, resetAt } : null,
-              );
-              if (usesExtraUsage && context.retryBudgetFailure === undefined) {
-                yield* Effect.forkDetach(
-                  failStalledTurn(
-                    context,
-                    paidUsageFailure(resetAt),
-                    Ref.get(activeTurn).pipe(Effect.map((current) => current === context)),
-                  ),
-                );
-              }
-            }
+            yield* guardExtraUsage(context, rateLimitInfo);
             const overageAllowed =
               rateLimitInfo.overageStatus === "allowed" ||
               rateLimitInfo.overageStatus === "allowed_warning" ||
@@ -10885,6 +10912,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   info.overageStatus === "allowed_warning" ||
                   info.isUsingOverage === true ||
                   info.overageInUse === true;
+                yield* guardExtraUsage(context, {
+                  ...info,
+                  rateLimitType:
+                    typeof info.rateLimitType === "string" ? info.rateLimitType : undefined,
+                });
                 if (!overageAllowed || adapterOptions.settings.stopBeforePaidUsage) {
                   context.latestAssistantRateLimit = {
                     type: typeof info.rateLimitType === "string" ? info.rateLimitType : "unknown",

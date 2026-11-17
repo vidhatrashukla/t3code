@@ -8321,6 +8321,112 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       ),
   );
 
+  it.effect("settles a turn failed when Claude finishes it right after reporting extra usage", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeWakeHarnessWithOptions({
+        settings: { ...DEFAULT_CLAUDE_SETTINGS, stopBeforePaidUsage: true },
+      });
+      const now = yield* DateTime.now;
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now,
+          attemptId: RunAttemptId.make("attempt-claude-extra-usage-race"),
+          text: "Continue.",
+          attachments: [],
+        }),
+      );
+      // The result is already queued when the stop would be sent.
+      yield* Queue.offerAll(harness.sdkMessages, [
+        claudeSdkFrame({
+          type: "rate_limit_event",
+          rate_limit_info: {
+            status: "allowed",
+            rateLimitType: "five_hour",
+            resetsAt: Math.floor(DateTime.toEpochMillis(now) / 1000) + 7_200,
+            isUsingOverage: true,
+          },
+          uuid: "00000000-0000-4000-8000-000000000621",
+          session_id: WAKE_NATIVE_SESSION,
+        }),
+        makeResultFrame({ uuid: "00000000-0000-4000-8000-000000000622", result: "Done." }),
+      ]);
+      const terminal = yield* Queue.take(harness.terminalReceipts);
+      assert.equal(terminal.status, "failed");
+      if (terminal.status !== "failed") return;
+      assert.equal(terminal.failure.code, "paid_usage_guard");
+      assert.lengthOf(harness.terminalEvents(), 1);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+          NodeCrypto.layer,
+        ),
+      ),
+    ),
+  );
+
+  it.effect("stops on a rate-limit error Claude would cover with extra usage", () =>
+    Effect.gen(function* () {
+      const interruptSent = yield* Deferred.make<void>();
+      const harness = yield* makeWakeHarnessWithOptions({
+        settings: { ...DEFAULT_CLAUDE_SETTINGS, stopBeforePaidUsage: true },
+        interrupt: Deferred.succeed(interruptSent, undefined).pipe(Effect.asVoid),
+      });
+      const now = yield* DateTime.now;
+      const start = (ordinal: number) =>
+        harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make(`attempt-claude-extra-usage-error-${ordinal}`),
+            providerTurnOrdinal: ordinal,
+            text: "Continue.",
+            attachments: [],
+          }),
+        );
+      yield* start(1);
+      yield* Queue.offer(
+        harness.sdkMessages,
+        makeAssistantErrorFrame({
+          uuid: "00000000-0000-4000-8000-000000000631",
+          error: "rate_limit",
+          apiErrorParams: {
+            rate_limit_info: {
+              status: "rejected",
+              rateLimitType: "five_hour",
+              resetsAt: Math.floor(DateTime.toEpochMillis(now) / 1000) + 7_200,
+              overageStatus: "allowed",
+            },
+          },
+        }),
+      );
+      yield* Deferred.await(interruptSent);
+      yield* Queue.shutdown(harness.sdkMessages);
+      const terminal = yield* Queue.take(harness.terminalReceipts);
+      assert.equal(terminal.status, "failed");
+      if (terminal.status !== "failed") return;
+      assert.equal(terminal.failure.code, "paid_usage_guard");
+      const refused = yield* start(2).pipe(Effect.flip);
+      assert.equal(ProviderAdapter.providerTurnRefusal(refused)?.code, "paid_usage_guard");
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+          NodeCrypto.layer,
+        ),
+      ),
+    ),
+  );
+
   it.effect("keeps a later future-window event-supplied Claude reset over the embedded reset", () =>
     Effect.gen(function* () {
       const harness = yield* makeWakeHarness;

@@ -6982,6 +6982,116 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
+  it.effect("stops a native subagent too when Codex starts billing credits", () =>
+    Effect.gen(function* () {
+      const base = interruptSubagentCommandTranscript.entries;
+      const stopIndex = base.findIndex(
+        (entry) => entry.type !== "runtime_exit" && entry.label === "turn/interrupt/root",
+      );
+      const shifted = (entry: CodexReplay.CodexAppServerReplayEntry) =>
+        entry.type !== "runtime_exit" &&
+        Predicate.isObject(entry.frame) &&
+        typeof entry.frame.id === "number"
+          ? withReplayRequestId(entry, entry.frame.id + 1)
+          : entry;
+      const completion = (threadId: string, turnId: string) => ({
+        type: "emit_inbound" as const,
+        label: `turn/completed/${threadId}`,
+        frame: {
+          method: "turn/completed",
+          params: { threadId, turn: makeCodexReplayTurn({ id: turnId, status: "interrupted" }) },
+        },
+      });
+      const interrupt = (id: number, threadId: string, turnId: string) => [
+        {
+          type: "expect_outbound" as const,
+          label: `turn/interrupt/${threadId}`,
+          frame: { id, method: "turn/interrupt", params: { threadId, turnId } },
+        },
+        {
+          type: "emit_inbound" as const,
+          label: `turn/interrupt/${threadId}`,
+          frame: { id, result: {} },
+        },
+      ];
+      const transcript = makeCodexReplayTranscript({
+        scenario: "codex-paid-usage-subagent",
+        entries: [
+          ...base.slice(0, 5),
+          ...accountReadEntries(true),
+          ...base.slice(5, stopIndex).map(shifted),
+          // Ids below land one higher once the harness adds its config read before turn/start.
+          {
+            type: "emit_inbound",
+            label: "account/rateLimits/updated",
+            frame: {
+              method: "account/rateLimits/updated",
+              params: { rateLimits: accountRead(false).rateLimits },
+            },
+          },
+          {
+            type: "expect_outbound",
+            label: "account/rateLimits/read/confirm",
+            frame: { id: 5, method: "account/rateLimits/read", params: null },
+          },
+          {
+            type: "emit_inbound",
+            label: "account/rateLimits/read/confirm",
+            frame: { id: 5, result: accountRead(false) },
+          },
+          ...interrupt(6, INTERRUPT_NATIVE_THREAD, INTERRUPT_NATIVE_TURN),
+          ...interrupt(7, INTERRUPT_CHILD_NATIVE_THREAD, INTERRUPT_CHILD_NATIVE_TURN),
+          completion(INTERRUPT_CHILD_NATIVE_THREAD, INTERRUPT_CHILD_NATIVE_TURN),
+          completion(INTERRUPT_NATIVE_THREAD, INTERRUPT_NATIVE_TURN),
+        ],
+      });
+      const interrupted: Array<unknown> = [];
+      const harness = yield* makeCodexReplayHarness(
+        transcript,
+        undefined,
+        (method, params) =>
+          Effect.sync(() => {
+            if (method === "turn/interrupt") interrupted.push(params);
+          }),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        guardedSettings,
+      );
+      yield* harness.runtime.startTurn(
+        makeCodexTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make("attempt-paid-usage-subagent"),
+          text: INTERRUPT_PROMPT,
+        }),
+      );
+      yield* harness.awaitTerminal(1);
+      const terminal = harness.terminalEvents()[0];
+      assert.equal(terminal?.status, "failed");
+      if (terminal?.status !== "failed") return;
+      assert.equal(terminal.failure.code, "paid_usage_guard");
+      yield* harness.until(() => interrupted.length === 2);
+      assert.deepEqual(interrupted[1], {
+        threadId: INTERRUPT_CHILD_NATIVE_THREAD,
+        turnId: INTERRUPT_CHILD_NATIVE_TURN,
+      });
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+          NodeCrypto.layer,
+        ),
+      ),
+    ),
+  );
+
   const rootCompletionIndex = interruptSubagentCommandTranscript.entries.findIndex(
     (entry) => entry.type === "emit_inbound" && entry.label === "turn/completed/root",
   );
@@ -7862,6 +7972,58 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       assert.equal(failure?.code, "paid_usage_guard");
       assert.equal(failure?.resetAt, "2033-05-19T07:20:00.000Z");
       assert.notInclude(requests, "turn/start");
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+          NodeCrypto.layer,
+        ),
+      ),
+    ),
+  );
+
+  it.effect("refuses compaction that Codex would bill to credits", () =>
+    Effect.gen(function* () {
+      const requests: Array<string> = [];
+      const transcript = makeCodexReplayTranscript({
+        scenario: "codex-paid-usage-compact",
+        entries: [
+          ...codexReplayPreamble({
+            nativeThreadId: "native-paid-usage-compact",
+            nativeTurnId: "unused",
+            prompt: "Hi.",
+          }).slice(0, 5),
+          ...accountReadEntries(false),
+        ],
+      });
+      const harness = yield* makeCodexReplayHarness(
+        transcript,
+        undefined,
+        (method) => Effect.sync(() => requests.push(method)),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        guardedSettings,
+      );
+      const compact = harness.runtime.compactThread;
+      assert.isDefined(compact);
+      if (compact === undefined) return;
+      const error = yield* compact(
+        makeCodexTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          text: "/compact",
+          attemptId: RunAttemptId.make("attempt-paid-usage-compact"),
+        }),
+      ).pipe(Effect.flip);
+      assert.equal(ProviderAdapter.providerTurnRefusal(error)?.code, "paid_usage_guard");
+      assert.notInclude(requests, "thread/compact/start");
     }).pipe(
       Effect.provide(
         Layer.mergeAll(

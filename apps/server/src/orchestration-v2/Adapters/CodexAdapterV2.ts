@@ -7190,11 +7190,30 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           },
         );
 
+        const interruptForPaidUsage = Effect.fn("CodexAdapterV2.interruptForPaidUsage")(function* (
+          context: ActiveCodexTurnContext,
+        ) {
+          const nativeThreadId = yield* getNativeThreadId(context.providerThread);
+          yield* client
+            .request("turn/interrupt", { threadId: nativeThreadId, turnId: context.nativeTurnId })
+            .pipe(
+              Effect.timeout("10 seconds"),
+              Effect.catch((cause) =>
+                Effect.logWarning("orchestration-v2.codex-paid-usage-interrupt-failed", {
+                  nativeThreadId,
+                  nativeTurnId: context.nativeTurnId,
+                  cause,
+                }),
+              ),
+            );
+        });
+
         const stopTurnsBeforePaidUsage = Effect.fn("CodexAdapterV2.stopTurnsBeforePaidUsage")(
           function* () {
             if (!(yield* wouldBillCredits)) return;
             const { failure } = yield* paidUsageRefusal;
-            for (const context of (yield* Ref.get(activeTurns)).values()) {
+            const contexts = Array.from((yield* Ref.get(activeTurns)).values());
+            for (const context of contexts) {
               if (context.subagent !== null) continue;
               context.latestProviderFailure = {
                 nativeMessage: failure.message,
@@ -7207,23 +7226,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 status: "failed",
                 completedAt: yield* DateTime.now,
               });
-              if (!finalized) continue;
-              const nativeThreadId = yield* getNativeThreadId(context.providerThread);
-              yield* client
-                .request("turn/interrupt", {
-                  threadId: nativeThreadId,
-                  turnId: context.nativeTurnId,
-                })
-                .pipe(
-                  Effect.timeout("10 seconds"),
-                  Effect.catch((cause) =>
-                    Effect.logWarning("orchestration-v2.codex-paid-usage-interrupt-failed", {
-                      nativeThreadId,
-                      nativeTurnId: context.nativeTurnId,
-                      cause,
-                    }),
-                  ),
-                );
+              if (finalized) yield* interruptForPaidUsage(context);
+              // A failed root leaves native children working, and they would keep billing credits.
+              for (const child of contexts) {
+                if (isDescendantCodexTurn(child, context)) yield* interruptForPaidUsage(child);
+              }
             }
           },
         );
@@ -8073,6 +8080,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           compactThread: Effect.fn("CodexAdapterV2.compactThread")(
             function* (turnInput) {
               const threadId = yield* getNativeThreadId(turnInput.providerThread);
+              if (adapterOptions.settings.stopBeforePaidUsage && (yield* wouldBillCredits)) {
+                return yield* yield* paidUsageRefusal;
+              }
               yield* Ref.update(pendingRootTurns, (current) =>
                 new Map(current).set(threadId, turnInput),
               );
