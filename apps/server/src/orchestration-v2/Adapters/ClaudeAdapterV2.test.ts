@@ -8370,6 +8370,60 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
+  it.effect("keeps the guard's failure when Claude's own limit failure lands first", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeWakeHarnessWithOptions({
+        settings: { ...DEFAULT_CLAUDE_SETTINGS, stopBeforePaidUsage: true },
+      });
+      const now = yield* DateTime.now;
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now,
+          attemptId: RunAttemptId.make("attempt-claude-extra-usage-429"),
+          text: "Continue.",
+          attachments: [],
+        }),
+      );
+      yield* Queue.offerAll(harness.sdkMessages, [
+        makeAssistantErrorFrame({
+          uuid: "00000000-0000-4000-8000-000000000641",
+          error: "rate_limit",
+          apiErrorParams: {
+            rate_limit_info: {
+              status: "rejected",
+              rateLimitType: "five_hour",
+              resetsAt: Math.floor(DateTime.toEpochMillis(now) / 1000) + 7_200,
+              overageStatus: "allowed",
+            },
+          },
+        }),
+        makeResultFrame({
+          uuid: "00000000-0000-4000-8000-000000000642",
+          result: "Usage limit reached.",
+          isError: true,
+          apiErrorStatus: 429,
+          terminalReason: "api_error",
+        }),
+      ]);
+      const terminal = yield* Queue.take(harness.terminalReceipts);
+      assert.equal(terminal.status, "failed");
+      if (terminal.status !== "failed") return;
+      assert.equal(terminal.failure.code, "paid_usage_guard");
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+          NodeCrypto.layer,
+        ),
+      ),
+    ),
+  );
+
   it.effect("stops on a rate-limit error Claude would cover with extra usage", () =>
     Effect.gen(function* () {
       const interruptSent = yield* Deferred.make<void>();

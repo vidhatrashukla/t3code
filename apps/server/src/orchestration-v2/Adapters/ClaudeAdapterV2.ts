@@ -9255,7 +9255,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           const paidUsage = requested.context.paidUsageFailure;
           const input =
             paidUsage !== undefined &&
-            (requested.status === "completed" || requested.status === "interrupted")
+            (requested.status === "completed" ||
+              requested.status === "interrupted" ||
+              requested.failure?.class === "usage_limit")
               ? { ...requested, status: "failed" as const, failure: paidUsage }
               : requested.status === "interrupted" && retryBudgetFailure !== undefined
                 ? { ...requested, status: "failed" as const, failure: retryBudgetFailure }

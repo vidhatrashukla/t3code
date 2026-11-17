@@ -7227,10 +7227,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 completedAt: yield* DateTime.now,
               });
               if (finalized) yield* interruptForPaidUsage(context);
-              // A failed root leaves native children working, and they would keep billing credits.
-              for (const child of contexts) {
-                if (isDescendantCodexTurn(child, context)) yield* interruptForPaidUsage(child);
-              }
+            }
+            // Native children outlive a failed or finished root and would keep billing credits.
+            for (const context of contexts) {
+              if (context.subagent !== null) yield* interruptForPaidUsage(context);
             }
           },
         );

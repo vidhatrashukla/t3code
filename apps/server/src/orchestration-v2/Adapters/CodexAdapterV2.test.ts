@@ -6982,6 +6982,124 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
+  it.effect("stops a native subagent that outlives its finished root", () =>
+    Effect.gen(function* () {
+      const base = interruptSubagentCommandTranscript.entries;
+      const stopIndex = base.findIndex(
+        (entry) => entry.type !== "runtime_exit" && entry.label === "turn/interrupt/root",
+      );
+      const shifted = (entry: CodexReplay.CodexAppServerReplayEntry) =>
+        entry.type !== "runtime_exit" &&
+        Predicate.isObject(entry.frame) &&
+        typeof entry.frame.id === "number"
+          ? withReplayRequestId(entry, entry.frame.id + 1)
+          : entry;
+      const transcript = makeCodexReplayTranscript({
+        scenario: "codex-paid-usage-orphan-subagent",
+        entries: [
+          ...base.slice(0, 5),
+          ...accountReadEntries(true),
+          ...base.slice(5, stopIndex).map(shifted),
+          {
+            type: "emit_inbound",
+            label: "turn/completed/root",
+            frame: {
+              method: "turn/completed",
+              params: {
+                threadId: INTERRUPT_NATIVE_THREAD,
+                turn: makeCodexReplayTurn({ id: INTERRUPT_NATIVE_TURN, status: "completed" }),
+              },
+            },
+          },
+          // Ids below land one higher once the harness adds its config read before turn/start.
+          {
+            type: "emit_inbound",
+            label: "account/rateLimits/updated",
+            frame: {
+              method: "account/rateLimits/updated",
+              params: { rateLimits: accountRead(false).rateLimits },
+            },
+          },
+          {
+            type: "expect_outbound",
+            label: "account/rateLimits/read/confirm",
+            frame: { id: 5, method: "account/rateLimits/read", params: null },
+          },
+          {
+            type: "emit_inbound",
+            label: "account/rateLimits/read/confirm",
+            frame: { id: 5, result: accountRead(false) },
+          },
+          {
+            type: "expect_outbound",
+            label: "turn/interrupt/child",
+            frame: {
+              id: 6,
+              method: "turn/interrupt",
+              params: {
+                threadId: INTERRUPT_CHILD_NATIVE_THREAD,
+                turnId: INTERRUPT_CHILD_NATIVE_TURN,
+              },
+            },
+          },
+          { type: "emit_inbound", label: "turn/interrupt/child", frame: { id: 6, result: {} } },
+          {
+            type: "emit_inbound",
+            label: "turn/completed/child",
+            frame: {
+              method: "turn/completed",
+              params: {
+                threadId: INTERRUPT_CHILD_NATIVE_THREAD,
+                turn: makeCodexReplayTurn({
+                  id: INTERRUPT_CHILD_NATIVE_TURN,
+                  status: "interrupted",
+                }),
+              },
+            },
+          },
+        ],
+      });
+      const interrupted: Array<unknown> = [];
+      const harness = yield* makeCodexReplayHarness(
+        transcript,
+        undefined,
+        (method, params) =>
+          Effect.sync(() => {
+            if (method === "turn/interrupt") interrupted.push(params);
+          }),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        guardedSettings,
+      );
+      yield* harness.runtime.startTurn(
+        makeCodexTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make("attempt-paid-usage-orphan-subagent"),
+          text: INTERRUPT_PROMPT,
+        }),
+      );
+      yield* harness.until(() => interrupted.length === 1);
+      assert.deepEqual(interrupted, [
+        { threadId: INTERRUPT_CHILD_NATIVE_THREAD, turnId: INTERRUPT_CHILD_NATIVE_TURN },
+      ]);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+          NodeCrypto.layer,
+        ),
+      ),
+    ),
+  );
+
   it.effect("stops a native subagent too when Codex starts billing credits", () =>
     Effect.gen(function* () {
       const base = interruptSubagentCommandTranscript.entries;
