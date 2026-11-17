@@ -89,6 +89,18 @@ Claude Code holds the turn until that window reopens, so it can keep showing as
 working. Wait for the reset, or stop the turn and continue later. The warning's
 timestamp shows when the displayed wait started.
 
+### Stop before extra usage
+
+If your plan has extra usage turned on, Claude keeps working after the plan runs
+out and bills extra usage. To stop instead, turn on **Stop before paid usage** for
+the Claude instance in Settings > Providers. Changing it restarts that instance.
+
+With it on, a turn stops as soon as Claude reports that it is using extra usage,
+and the thread shows a usage-limit error with the reset time. Until that window
+resets, T3 Code does not send new turns on this instance. Claude reports this with
+its reply, so a turn can use a small amount of extra usage before it stops. To
+cap extra usage itself, set a limit or turn it off in Claude's Settings > Usage.
+
 ## Skills
 
 Claude skills come from the config directory's `skills` folder and the project's

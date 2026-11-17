@@ -209,7 +209,9 @@ import {
 } from "../../provider/EventNdjsonLogger.ts";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import {
+  CLAUDE_PAID_USAGE_GUARD_MESSAGE,
   claudeRateLimitEventToUpdate,
+  claudeUsesExtraUsage,
   type ClaudeScopedLimitNames,
 } from "../../provider/claudeUsageLimits.ts";
 import type { ManagedServerProvider } from "@t3tools/provider-core/server/snapshot";
@@ -5801,6 +5803,19 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         });
         const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
         const activeTurn = yield* Ref.make<ActiveClaudeTurnContext | null>(null);
+        // Stop before paid usage: the last report that the plan was drawing on extra usage.
+        const extraUsageInUse = yield* Ref.make<{
+          readonly rateLimitType: string | undefined;
+          readonly resetAt: string | null;
+        } | null>(null);
+        const paidUsageFailure = (resetAt: string | null) =>
+          makeProviderFailure({
+            class: "usage_limit",
+            code: "paid_usage_guard",
+            message: CLAUDE_PAID_USAGE_GUARD_MESSAGE,
+            retryable: false,
+            resetAt,
+          });
         const taskOutputTails = new Map<
           string,
           { readonly fiber: Fiber.Fiber<void>; readonly stop: Deferred.Deferred<void> }
@@ -10471,6 +10486,23 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               });
               return;
             }
+            if (adapterOptions.settings.stopBeforePaidUsage) {
+              const usesExtraUsage = claudeUsesExtraUsage(rateLimitInfo);
+              const resetAt = claudeUsageLimitResetAt(rateLimitInfo.resetsAt);
+              yield* Ref.set(
+                extraUsageInUse,
+                usesExtraUsage ? { rateLimitType: rateLimitInfo.rateLimitType, resetAt } : null,
+              );
+              if (usesExtraUsage && context.retryBudgetFailure === undefined) {
+                yield* Effect.forkDetach(
+                  failStalledTurn(
+                    context,
+                    paidUsageFailure(resetAt),
+                    Ref.get(activeTurn).pipe(Effect.map((current) => current === context)),
+                  ),
+                );
+              }
+            }
             const overageAllowed =
               rateLimitInfo.overageStatus === "allowed" ||
               rateLimitInfo.overageStatus === "allowed_warning" ||
@@ -10852,7 +10884,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   info.overageStatus === "allowed_warning" ||
                   info.isUsingOverage === true ||
                   info.overageInUse === true;
-                if (!overageAllowed) {
+                if (!overageAllowed || adapterOptions.settings.stopBeforePaidUsage) {
                   context.latestAssistantRateLimit = {
                     type: typeof info.rateLimitType === "string" ? info.rateLimitType : "unknown",
                     resetAt: claudeUsageLimitResetAt(info.resetsAt),
@@ -13083,6 +13115,24 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               nativeTurnId,
             });
             const providerTurnOrdinal = turnInput.providerTurnOrdinal;
+            if (adapterOptions.settings.stopBeforePaidUsage) {
+              // Model-specific weekly windows may not apply to this turn's model, so only plan-wide ones refuse.
+              const inUse = yield* Ref.get(extraUsageInUse);
+              if (
+                inUse !== null &&
+                inUse.resetAt !== null &&
+                Date.parse(inUse.resetAt) > DateTime.toEpochMillis(startedAt) &&
+                (inUse.rateLimitType === undefined ||
+                  inUse.rateLimitType === "five_hour" ||
+                  inUse.rateLimitType === "seven_day" ||
+                  inUse.rateLimitType === "overage")
+              ) {
+                return yield* new ProviderAdapter.ProviderAdapterTurnRefusedError({
+                  driver: CLAUDE_PROVIDER,
+                  failure: paidUsageFailure(inUse.resetAt),
+                });
+              }
+            }
             const currentTurn = yield* Ref.get(activeTurn);
             if (currentTurn !== null) {
               return yield* new ProviderAdapter.ProviderAdapterProtocolError({

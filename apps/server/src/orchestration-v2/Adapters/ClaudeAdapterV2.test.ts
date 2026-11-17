@@ -8249,6 +8249,78 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
+  it.effect.each([true, false])(
+    "stops a turn drawing on extra usage only when Stop before paid usage is %s",
+    (guarded) =>
+      Effect.gen(function* () {
+        const interruptSent = yield* Deferred.make<void>();
+        const harness = yield* makeWakeHarnessWithOptions({
+          settings: { ...DEFAULT_CLAUDE_SETTINGS, stopBeforePaidUsage: guarded },
+          interrupt: Deferred.succeed(interruptSent, undefined).pipe(Effect.asVoid),
+        });
+        const now = yield* DateTime.now;
+        const resetsAt = Math.floor(DateTime.toEpochMillis(now) / 1000) + 7_200;
+        const start = (ordinal: number) =>
+          harness.runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make(`attempt-claude-extra-usage-${ordinal}`),
+              providerTurnOrdinal: ordinal,
+              text: "Continue.",
+              attachments: [],
+            }),
+          );
+        yield* start(1);
+        yield* Queue.offer(
+          harness.sdkMessages,
+          claudeSdkFrame({
+            type: "rate_limit_event",
+            rate_limit_info: {
+              status: "allowed",
+              rateLimitType: "five_hour",
+              resetsAt,
+              overageStatus: "allowed",
+              isUsingOverage: true,
+            },
+            uuid: "00000000-0000-4000-8000-000000000611",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+        );
+        if (!guarded) {
+          yield* Queue.offer(
+            harness.sdkMessages,
+            makeResultFrame({ uuid: "00000000-0000-4000-8000-000000000612", result: "Done." }),
+          );
+          assert.equal((yield* Queue.take(harness.terminalReceipts)).status, "completed");
+          assert.isFalse(yield* Deferred.isDone(interruptSent));
+          return;
+        }
+        yield* Deferred.await(interruptSent);
+        yield* Queue.shutdown(harness.sdkMessages);
+        const terminal = yield* Queue.take(harness.terminalReceipts);
+        assert.equal(terminal.status, "failed");
+        if (terminal.status !== "failed") return;
+        assert.equal(terminal.failure.class, "usage_limit");
+        assert.equal(terminal.failure.code, "paid_usage_guard");
+        assert.isNotNull(terminal.failure.resetAt);
+        // Until that window resets, the next turn is refused before Claude is asked.
+        const refused = yield* start(2).pipe(Effect.flip);
+        assert.equal(ProviderAdapter.providerTurnRefusal(refused)?.code, "paid_usage_guard");
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+            NodeCrypto.layer,
+          ),
+        ),
+      ),
+  );
+
   it.effect("keeps a later future-window event-supplied Claude reset over the embedded reset", () =>
     Effect.gen(function* () {
       const harness = yield* makeWakeHarness;

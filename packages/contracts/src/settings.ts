@@ -704,6 +704,16 @@ export function makeProviderSettingsSchema<const Fields extends Schema.Struct.Fi
   );
 }
 
+const stopBeforePaidUsageSetting = (description: string) =>
+  Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+    Schema.annotateKey({
+      title: "Stop before paid usage",
+      description,
+      providerSettingsForm: { control: "switch" },
+    }),
+  );
+
 export const CodexSettings = makeProviderSettingsSchema(
   {
     setupMode: Schema.optionalKey(Schema.Literals(["managed", "existing"])).pipe(
@@ -754,9 +764,12 @@ export const CodexSettings = makeProviderSettingsSchema(
       Schema.withDecodingDefault(Effect.succeed([])),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
+    stopBeforePaidUsage: stopBeforePaidUsageSetting(
+      "When the plan's included usage is used up, stop instead of spending ChatGPT credits. Works only when Codex reports its usage.",
+    ),
   },
   {
-    order: ["binaryPath", "homePath", "shadowHomePath", "launchArgs"],
+    order: ["binaryPath", "homePath", "shadowHomePath", "launchArgs", "stopBeforePaidUsage"],
   },
 );
 export type CodexSettings = typeof CodexSettings.Type;
@@ -847,9 +860,19 @@ export const ClaudeSettings = makeProviderSettingsSchema(
         },
       }),
     ),
+    stopBeforePaidUsage: stopBeforePaidUsageSetting(
+      "When the plan's included usage is used up, stop instead of using extra usage. Works only when Claude reports its usage.",
+    ),
   },
   {
-    order: ["binaryPath", "homePath", "autoCompactWindow", "idleCompaction", "launchArgs"],
+    order: [
+      "binaryPath",
+      "homePath",
+      "autoCompactWindow",
+      "idleCompaction",
+      "launchArgs",
+      "stopBeforePaidUsage",
+    ],
   },
 );
 export type ClaudeSettings = typeof ClaudeSettings.Type;

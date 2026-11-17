@@ -23,7 +23,10 @@ import {
   codexDefaultReasoningEffortOverride,
 } from "../../provider/CodexProvider.ts";
 import {
+  CODEX_PAID_USAGE_GUARD_MESSAGE,
+  codexRateLimitsMayBeExhausted,
   codexRateLimitsToUpdate,
+  codexWouldBillCredits,
   mergeCodexRateLimits,
   codexMessageResetAt,
   codexTimeZone,
@@ -4954,11 +4957,18 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               const checkedAt = DateTime.formatIso(yield* DateTime.now);
               yield* adapterOptions.onUsageLimits({ ...update, checkedAt });
             }
+            // Updates omit whether included usage is allowed, so a likely change is confirmed by a read.
+            if (
+              adapterOptions.settings.stopBeforePaidUsage &&
+              codexRateLimitsMayBeExhausted(payload.rateLimits) &&
+              (yield* Ref.get(activeTurns)).size > 0
+            ) {
+              yield* Effect.forkDetach(stopTurnsBeforePaidUsage());
+            }
           }).pipe(Effect.orDie),
         );
 
-        // A run's first request can 429 before Codex pushes a codex snapshot.
-        const readUsageLimitReset = Effect.gen(function* () {
+        const readRateLimits = Effect.gen(function* () {
           const sent = yield* Ref.get(rateLimitSnapshot);
           const response = yield* client
             .request("account/rateLimits/read", null)
@@ -4968,7 +4978,36 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           yield* Ref.update(rateLimitSnapshot, (current) =>
             current === sent ? mergeCodexRateLimits(current, read) : current,
           );
-        }).pipe(
+          return response;
+        });
+
+        // Stop before paid usage: an unreadable state lets the turn run rather than block it.
+        const wouldBillCredits = readRateLimits.pipe(
+          Effect.map(codexWouldBillCredits),
+          Effect.catchCauseIf(
+            (cause) => !Cause.hasInterrupts(cause),
+            (cause) =>
+              Effect.logWarning("orchestration-v2.codex-paid-usage-read-failed", { cause }).pipe(
+                Effect.as(false),
+              ),
+          ),
+        );
+        const paidUsageRefusal = Effect.gen(function* () {
+          return new ProviderAdapter.ProviderAdapterTurnRefusedError({
+            driver: CODEX_PROVIDER,
+            failure: makeProviderFailure({
+              class: "usage_limit",
+              code: "paid_usage_guard",
+              message: CODEX_PAID_USAGE_GUARD_MESSAGE,
+              retryable: false,
+              resetAt: codexUsageLimitResetAt(yield* Ref.get(rateLimitSnapshot)),
+            }),
+          });
+        });
+
+        // A run's first request can 429 before Codex pushes a codex snapshot.
+        const readUsageLimitReset = readRateLimits.pipe(
+          Effect.asVoid,
           // The terminal waits on this read, so no failure may skip it; interruption ends both.
           Effect.catchCauseIf(
             (cause) => !Cause.hasInterrupts(cause),
@@ -7150,6 +7189,44 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           },
         );
 
+        const stopTurnsBeforePaidUsage = Effect.fn("CodexAdapterV2.stopTurnsBeforePaidUsage")(
+          function* () {
+            if (!(yield* wouldBillCredits)) return;
+            const { failure } = yield* paidUsageRefusal;
+            for (const context of (yield* Ref.get(activeTurns)).values()) {
+              if (context.subagent !== null) continue;
+              context.latestProviderFailure = {
+                nativeMessage: failure.message,
+                nativeCode: failure.code ?? null,
+                failure,
+              };
+              const finalized = yield* finalizeCodexTurn({
+                context,
+                nativeTurnId: context.nativeTurnId,
+                status: "failed",
+                completedAt: yield* DateTime.now,
+              });
+              if (!finalized) continue;
+              const nativeThreadId = yield* getNativeThreadId(context.providerThread);
+              yield* client
+                .request("turn/interrupt", {
+                  threadId: nativeThreadId,
+                  turnId: context.nativeTurnId,
+                })
+                .pipe(
+                  Effect.timeout("10 seconds"),
+                  Effect.catch((cause) =>
+                    Effect.logWarning("orchestration-v2.codex-paid-usage-interrupt-failed", {
+                      nativeThreadId,
+                      nativeTurnId: context.nativeTurnId,
+                      cause,
+                    }),
+                  ),
+                );
+            }
+          },
+        );
+
         // Codex can end an overloaded turn without retry advice. Continue its
         // persisted history with empty input instead of resending the user message.
         const retryCapacityFailure = Effect.fn("CodexAdapterV2.retryCapacityFailure")(function* (
@@ -7529,6 +7606,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             codexInput: ReadonlyArray<CodexSchema.V2TurnStartParams__UserInput>,
           ) {
             const threadId = yield* getNativeThreadId(turnInput.providerThread);
+            if (adapterOptions.settings.stopBeforePaidUsage && (yield* wouldBillCredits)) {
+              return yield* yield* paidUsageRefusal;
+            }
             const mcpSession = yield* mcpSessions.read(turnInput.threadId);
             const models = adapterOptions.models === undefined ? [] : yield* adapterOptions.models;
             const configuredReasoningSummary = yield* client

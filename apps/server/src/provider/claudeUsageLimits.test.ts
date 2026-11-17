@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { claudeRateLimitEventToUpdate, claudeUsageResponseToLimits } from "./claudeUsageLimits.ts";
+import {
+  claudeRateLimitEventToUpdate,
+  claudeUsageResponseToLimits,
+  claudeUsesExtraUsage,
+} from "./claudeUsageLimits.ts";
 
 const checkedAt = "2026-07-18T10:00:00.000Z";
 const noNames = { overageIncluded: undefined } as const;
@@ -283,5 +287,29 @@ describe("claudeRateLimitEventToUpdate", () => {
         },
       ],
     });
+  });
+});
+
+describe("claudeUsesExtraUsage", () => {
+  it("is true when Claude reports extra usage in use or a rejected window it will cover", () => {
+    expect(claudeUsesExtraUsage({ status: "allowed", isUsingOverage: true })).toBe(true);
+    expect(claudeUsesExtraUsage({ status: "allowed", overageInUse: true })).toBe(true);
+    expect(claudeUsesExtraUsage({ status: "rejected", overageStatus: "allowed" })).toBe(true);
+    expect(claudeUsesExtraUsage({ status: "rejected", overageStatus: "allowed_warning" })).toBe(
+      true,
+    );
+  });
+
+  it("is false for a healthy window even when extra usage is enabled", () => {
+    // The live report from an account with extra usage turned off at the organization.
+    expect(
+      claudeUsesExtraUsage({
+        status: "allowed",
+        overageStatus: "rejected",
+        isUsingOverage: false,
+      }),
+    ).toBe(false);
+    expect(claudeUsesExtraUsage({ status: "allowed", overageStatus: "allowed" })).toBe(false);
+    expect(claudeUsesExtraUsage({ status: "rejected", overageStatus: "rejected" })).toBe(false);
   });
 });

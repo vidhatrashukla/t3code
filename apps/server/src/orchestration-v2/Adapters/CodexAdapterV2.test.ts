@@ -1469,6 +1469,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     promptSuggestions: Effect.Effect<boolean> = Effect.succeed(false),
     onNotification: (method: string) => Effect.Effect<void> = () => Effect.void,
     models?: CodexAdapterV2.CodexAdapterV2Options["models"],
+    settings: CodexSettings = DEFAULT_CODEX_SETTINGS,
   ) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -1528,7 +1529,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       };
       const adapter = yield* CodexAdapterV2.makeCodexAdapterV2({
         instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
-        settings: DEFAULT_CODEX_SETTINGS,
+        settings,
         environment: {},
         clientFactory,
         ...(onUsageLimits ? { onUsageLimits } : {}),
@@ -7776,6 +7777,237 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.include(terminal.failure.message, scenario.expectedMessage);
         assert.equal(terminal.failure.resetAt, null);
       }
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+          NodeCrypto.layer,
+        ),
+      ),
+    ),
+  );
+
+  // The read a Pro account returned after its weekly window ran out with credits left.
+  const accountRead = (ordinaryUsageAllowed: boolean) => ({
+    ordinaryUsageAllowed,
+    rateLimits: {
+      limitId: "codex",
+      primary: {
+        usedPercent: ordinaryUsageAllowed ? 40 : 100,
+        resetsAt: 2000100000,
+        windowDurationMins: 10080,
+      },
+      credits: { hasCredits: true, unlimited: false, balance: "47553.11" },
+      spendControlReached: false,
+      rateLimitReachedType: ordinaryUsageAllowed ? null : "rate_limit_reached",
+    },
+  });
+  const guardedSettings = { ...DEFAULT_CODEX_SETTINGS, stopBeforePaidUsage: true };
+  const accountReadEntries = (
+    ordinaryUsageAllowed: boolean,
+  ): Array<CodexReplay.CodexAppServerReplayEntry> => [
+    {
+      type: "expect_outbound",
+      label: "account/rateLimits/read",
+      frame: { id: 3, method: "account/rateLimits/read", params: null },
+    },
+    {
+      type: "emit_inbound",
+      label: "account/rateLimits/read",
+      frame: { id: 3, result: accountRead(ordinaryUsageAllowed) },
+    },
+  ];
+
+  it.effect("refuses a turn before Codex bills credits when Stop before paid usage is on", () =>
+    Effect.gen(function* () {
+      const nativeThreadId = "native-paid-usage-refused";
+      const requests: Array<string> = [];
+      const transcript = makeCodexReplayTranscript({
+        scenario: "codex-paid-usage-refused",
+        entries: [
+          ...codexReplayPreamble({ nativeThreadId, nativeTurnId: "unused", prompt: "Hi." }).slice(
+            0,
+            5,
+          ),
+          ...accountReadEntries(false),
+        ],
+      });
+      const harness = yield* makeCodexReplayHarness(
+        transcript,
+        undefined,
+        (method) => Effect.sync(() => requests.push(method)),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        guardedSettings,
+      );
+      const error = yield* harness.runtime
+        .startTurn(
+          makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            text: "Hi.",
+            attemptId: RunAttemptId.make("attempt-paid-usage-refused"),
+          }),
+        )
+        .pipe(Effect.flip);
+      const failure = ProviderAdapter.providerTurnRefusal(error);
+      assert.equal(failure?.class, "usage_limit");
+      assert.equal(failure?.code, "paid_usage_guard");
+      assert.equal(failure?.resetAt, "2033-05-19T07:20:00.000Z");
+      assert.notInclude(requests, "turn/start");
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+          NodeCrypto.layer,
+        ),
+      ),
+    ),
+  );
+
+  it.effect("stops a running turn once Codex starts billing credits", () =>
+    Effect.gen(function* () {
+      const nativeThreadId = "native-paid-usage-midturn";
+      const nativeTurnId = "turn-paid-usage-midturn";
+      const preamble = codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt: "Hi." });
+      const exhausted = accountRead(false).rateLimits;
+      const transcript = makeCodexReplayTranscript({
+        scenario: "codex-paid-usage-midturn",
+        entries: [
+          ...preamble.slice(0, 5),
+          ...accountReadEntries(true),
+          ...preamble
+            .slice(5)
+            .map((entry) =>
+              entry.type !== "runtime_exit" &&
+              Predicate.isObject(entry.frame) &&
+              typeof entry.frame.id === "number"
+                ? withReplayRequestId(entry, entry.frame.id + 1)
+                : entry,
+            ),
+          // The harness adds a config read before turn/start, so these ids land one higher.
+          {
+            type: "emit_inbound",
+            label: "account/rateLimits/updated",
+            frame: { method: "account/rateLimits/updated", params: { rateLimits: exhausted } },
+          },
+          {
+            type: "expect_outbound",
+            label: "account/rateLimits/read/confirm",
+            frame: { id: 5, method: "account/rateLimits/read", params: null },
+          },
+          {
+            type: "emit_inbound",
+            label: "account/rateLimits/read/confirm",
+            frame: { id: 5, result: accountRead(false) },
+          },
+          {
+            type: "expect_outbound",
+            label: "turn/interrupt",
+            frame: {
+              id: 6,
+              method: "turn/interrupt",
+              params: { threadId: nativeThreadId, turnId: nativeTurnId },
+            },
+          },
+          { type: "emit_inbound", label: "turn/interrupt", frame: { id: 6, result: {} } },
+        ],
+      });
+      const harness = yield* makeCodexReplayHarness(
+        transcript,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        guardedSettings,
+      );
+      yield* harness.runtime.startTurn(
+        makeCodexTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          text: "Hi.",
+          attemptId: RunAttemptId.make("attempt-paid-usage-midturn"),
+        }),
+      );
+      yield* harness.firstTerminal;
+      const terminal = harness.terminalEvents()[0];
+      assert.equal(terminal?.status, "failed");
+      if (terminal?.status !== "failed") return;
+      assert.equal(terminal.failure.class, "usage_limit");
+      assert.equal(terminal.failure.code, "paid_usage_guard");
+      assert.equal(terminal.failure.resetAt, "2033-05-19T07:20:00.000Z");
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+          NodeCrypto.layer,
+        ),
+      ),
+    ),
+  );
+
+  it.effect("starts the turn when the plan still covers it", () =>
+    Effect.gen(function* () {
+      const nativeThreadId = "native-paid-usage-allowed";
+      const preamble = codexReplayPreamble({
+        nativeThreadId,
+        nativeTurnId: "turn-paid-usage-allowed",
+        prompt: "Hi.",
+      });
+      const transcript = makeCodexReplayTranscript({
+        scenario: "codex-paid-usage-allowed",
+        entries: [
+          ...preamble.slice(0, 5),
+          ...accountReadEntries(true),
+          // Requests after the read move up one id.
+          ...preamble
+            .slice(5)
+            .map((entry) =>
+              entry.type !== "runtime_exit" &&
+              Predicate.isObject(entry.frame) &&
+              typeof entry.frame.id === "number"
+                ? withReplayRequestId(entry, entry.frame.id + 1)
+                : entry,
+            ),
+        ],
+      });
+      const harness = yield* makeCodexReplayHarness(
+        transcript,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        guardedSettings,
+      );
+      yield* harness.runtime.startTurn(
+        makeCodexTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          text: "Hi.",
+          attemptId: RunAttemptId.make("attempt-paid-usage-allowed"),
+        }),
+      );
     }).pipe(
       Effect.provide(
         Layer.mergeAll(

@@ -239,3 +239,21 @@ export const recordClaudeUsageResponse = (
   const { limits, names } = claudeUsageResponseToLimits(input);
   return Ref.set(namesRef, names).pipe(Effect.as(limits));
 };
+
+export const CLAUDE_PAID_USAGE_GUARD_MESSAGE =
+  "Stopped before using extra usage: this plan's included Claude usage is used up, and Stop before paid usage is on for this provider.";
+
+/** Whether a rate-limit report shows the request billed as extra usage rather than the plan. */
+export function claudeUsesExtraUsage(info: {
+  readonly status?: string | undefined;
+  readonly overageStatus?: string | undefined;
+  readonly isUsingOverage?: boolean | undefined;
+  readonly overageInUse?: boolean | undefined;
+}): boolean {
+  return (
+    info.isUsingOverage === true ||
+    info.overageInUse === true ||
+    (info.status === "rejected" &&
+      (info.overageStatus === "allowed" || info.overageStatus === "allowed_warning"))
+  );
+}

@@ -370,6 +370,31 @@ export class ProviderAdapterTurnStartError extends Schema.TaggedError<ProviderAd
   }
 }
 
+/**
+ * An adapter declined to send a turn and says why, such as a usage guard. The run ends with this
+ * failure instead of a generic start error, so its class (for example `usage_limit`) still applies.
+ */
+export class ProviderAdapterTurnRefusedError extends Schema.TaggedError<ProviderAdapterTurnRefusedError>()(
+  "ProviderAdapterTurnRefusedError",
+  {
+    driver: ProviderDriverKind,
+    failure: OrchestrationV2ProviderFailure,
+  },
+) {
+  override get message(): string {
+    return this.failure.message;
+  }
+}
+
+const isTurnStartError = Schema.is(ProviderAdapterTurnStartError);
+const isTurnRefusedError = Schema.is(ProviderAdapterTurnRefusedError);
+
+/** The refusal behind a turn start error, whether raised directly or wrapped as its cause. */
+export const providerTurnRefusal = (error: unknown): OrchestrationV2ProviderFailure | undefined => {
+  const inner = isTurnStartError(error) ? error.cause : error;
+  return isTurnRefusedError(inner) ? inner.failure : undefined;
+};
+
 export class ProviderAdapterSteerRunUnsupportedError extends Schema.TaggedError<ProviderAdapterSteerRunUnsupportedError>()(
   "ProviderAdapterSteerRunUnsupportedError",
   {

@@ -249,3 +249,37 @@ export function codexMessageResetAt(
   const resetAt = DateTime.add(reset.value, { minutes: 1 });
   return DateTime.isGreaterThan(resetAt, failedAt) ? DateTime.formatIso(resetAt) : null;
 }
+
+interface CodexCreditsState {
+  readonly credits?: { readonly hasCredits: boolean; readonly unlimited: boolean } | null;
+  readonly spendControlReached?: boolean | null;
+}
+
+export const CODEX_PAID_USAGE_GUARD_MESSAGE =
+  "Stopped before using ChatGPT credits: this plan's included Codex usage is used up, and Stop before paid usage is on for this provider.";
+
+/**
+ * Whether Codex would bill credits for the next request: the backend says included usage is
+ * unavailable, credits can pay, and no spend cap stops them first. Unknown means it would not.
+ */
+export function codexWouldBillCredits(read: {
+  readonly ordinaryUsageAllowed?: boolean | null;
+  readonly rateLimits: CodexCreditsState;
+  readonly rateLimitsByLimitId?: Readonly<Record<string, CodexCreditsState>> | null;
+}): boolean {
+  if (read.ordinaryUsageAllowed !== false) return false;
+  const limits = read.rateLimitsByLimitId?.codex ?? read.rateLimits;
+  if (limits.spendControlReached === true) return false;
+  return limits.credits?.hasCredits === true || limits.credits?.unlimited === true;
+}
+
+/** A pushed update that may mean included usage just ran out, worth confirming with a read. */
+export function codexRateLimitsMayBeExhausted(
+  snapshot: CodexRateLimitSnapshot & CodexCreditsState,
+): boolean {
+  if (snapshot.credits?.hasCredits !== true && snapshot.credits?.unlimited !== true) return false;
+  return (
+    snapshot.rateLimitReachedType != null ||
+    [snapshot.primary, snapshot.secondary].some((window) => (window?.usedPercent ?? 0) >= 100)
+  );
+}

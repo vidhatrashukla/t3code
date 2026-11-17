@@ -9,7 +9,9 @@ import {
   codexRateLimitsFailureMessage,
   codexRateLimitsToLimits,
   codexRateLimitsToUpdate,
+  codexRateLimitsMayBeExhausted,
   codexTimeZone,
+  codexWouldBillCredits,
   mergeCodexRateLimits,
 } from "./codexUsageLimits.ts";
 
@@ -372,5 +374,75 @@ describe("codexTimeZone", () => {
     expect(DateTime.zoneToString(codexTimeZone({ TZ: ":Asia/Dhaka" }))).toBe("Asia/Dhaka");
     expect(DateTime.zoneToString(codexTimeZone({ TZ: "not/a-zone" }))).toBe(local);
     expect(DateTime.zoneToString(codexTimeZone({}))).toBe(local);
+  });
+});
+
+describe("codexWouldBillCredits", () => {
+  // The read a Pro account returned once its weekly window ran out with credits left.
+  const exhausted = {
+    ordinaryUsageAllowed: false,
+    rateLimits: {
+      credits: { hasCredits: true, unlimited: false, balance: "47553.11" },
+      spendControlReached: false,
+    },
+  };
+
+  it("bills credits only when included usage is unavailable and credits can pay", () => {
+    expect(codexWouldBillCredits(exhausted)).toBe(true);
+    expect(codexWouldBillCredits({ ...exhausted, ordinaryUsageAllowed: true })).toBe(false);
+    expect(
+      codexWouldBillCredits({
+        ...exhausted,
+        rateLimits: { credits: { hasCredits: false, unlimited: true } },
+      }),
+    ).toBe(true);
+    expect(
+      codexWouldBillCredits({
+        ...exhausted,
+        rateLimits: { credits: { hasCredits: false, unlimited: false } },
+      }),
+    ).toBe(false);
+  });
+
+  it("treats an unknown allowance or a reached spend cap as not billing", () => {
+    expect(codexWouldBillCredits({ ...exhausted, ordinaryUsageAllowed: null })).toBe(false);
+    expect(codexWouldBillCredits({ rateLimits: exhausted.rateLimits })).toBe(false);
+    expect(
+      codexWouldBillCredits({
+        ...exhausted,
+        rateLimits: { ...exhausted.rateLimits, spendControlReached: true },
+      }),
+    ).toBe(false);
+  });
+
+  it("reads the codex limit when the response lists limits by id", () => {
+    expect(
+      codexWouldBillCredits({
+        ordinaryUsageAllowed: false,
+        rateLimits: { credits: null },
+        rateLimitsByLimitId: { codex: exhausted.rateLimits },
+      }),
+    ).toBe(true);
+  });
+});
+
+describe("codexRateLimitsMayBeExhausted", () => {
+  const credits = { hasCredits: true, unlimited: false };
+
+  it("flags a full window or a reached limit when credits could pay", () => {
+    expect(codexRateLimitsMayBeExhausted({ credits, primary: { usedPercent: 100 } })).toBe(true);
+    expect(
+      codexRateLimitsMayBeExhausted({ credits, rateLimitReachedType: "rate_limit_reached" }),
+    ).toBe(true);
+    expect(codexRateLimitsMayBeExhausted({ credits, primary: { usedPercent: 99 } })).toBe(false);
+  });
+
+  it("ignores exhaustion that credits cannot pay for", () => {
+    expect(
+      codexRateLimitsMayBeExhausted({
+        credits: { hasCredits: false, unlimited: false },
+        primary: { usedPercent: 100 },
+      }),
+    ).toBe(false);
   });
 });

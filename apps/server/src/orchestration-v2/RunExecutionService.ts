@@ -2315,10 +2315,11 @@ export const layer: Layer.Layer<
                           },
                           openRunOwnedSubagents: openSubagents,
                           terminal: makeFailedTerminalEvent(
-                            makeProviderFailure({
-                              cause: Cause.squash(cause),
-                              class: Exit.isFailure(shouldStart) ? "unknown" : "provider_error",
-                            }),
+                            ProviderAdapter.providerTurnRefusal(Cause.squash(cause)) ??
+                              makeProviderFailure({
+                                cause: Cause.squash(cause),
+                                class: Exit.isFailure(shouldStart) ? "unknown" : "provider_error",
+                              }),
                             latestItemOrdinal + 1,
                           ),
                           failureItemPersisted: false,

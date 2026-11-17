@@ -144,6 +144,18 @@ when it resets, when Codex reports them. Send the message again after the reset.
 message also says whether your workspace owner needs to add credits or raise the
 spend limit to continue sooner.
 
+## Stop before spending credits
+
+When your plan's included usage runs out and your account has ChatGPT credits,
+Codex continues on credits. To stop instead, turn on **Stop before paid usage** for
+the Codex instance in Settings > Providers. Changing it restarts that instance.
+
+With it on, T3 Code checks your Codex usage before each turn and does not send it
+when it would be billed to credits. The thread shows a usage-limit error with the
+reset time. If a turn is running when the plan runs out, T3 Code stops it. When
+Codex does not report your usage, for example with an API key, turns are sent as
+usual.
+
 ## Send feedback to OpenAI
 
 In an existing Codex thread, send `/feedback` with an optional description, for
