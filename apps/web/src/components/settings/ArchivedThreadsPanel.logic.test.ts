@@ -58,6 +58,24 @@ describe("filterArchivedThreadGroups", () => {
     expect(filterArchivedThreadGroups(groups, "build box")).toEqual([billing]);
   });
 
+  it("keeps list order and only the matching environment's threads in a mixed group", () => {
+    const mixed = {
+      title: "shop",
+      project: { title: "storefront", workspaceRoot: "/code/storefront" },
+      threads: [
+        thread("m1", "Update the login copy", "This Mac"),
+        thread("m2", "Login", "Build box"),
+        thread("m3", "Release notes", "Build box"),
+      ],
+    };
+    expect(filterArchivedThreadGroups([mixed], "login")).toEqual([
+      { ...mixed, threads: [mixed.threads[0], mixed.threads[1]] },
+    ]);
+    expect(filterArchivedThreadGroups([mixed], "build box")).toEqual([
+      { ...mixed, threads: [mixed.threads[1], mixed.threads[2]] },
+    ]);
+  });
+
   it("returns no groups when nothing matches", () => {
     expect(filterArchivedThreadGroups(groups, "refund")).toEqual([]);
   });
