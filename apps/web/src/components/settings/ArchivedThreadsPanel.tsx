@@ -31,110 +31,127 @@ const ARCHIVE_ACTIONS = [
 ] as const;
 type ArchiveAction = (typeof ARCHIVE_ACTIONS)[number]["action"];
 
-export function ArchivedThreadsPanel() {
+type SettingsScopeValue = ReturnType<typeof useSettingsScope>;
+
+function groupArchivedThreads(
+  archivedSnapshots: ReturnType<typeof useArchivedThreadSnapshots>["snapshots"],
+  scope: SettingsScopeValue["scope"],
+  projectGroups: SettingsScopeValue["groups"],
+  environments: SettingsScopeValue["environments"],
+) {
+  const selectedProjectKeys =
+    scope.kind === "project" || scope.kind === "checkout"
+      ? new Set(scope.members.map((member) => `${member.environmentId}:${member.id}`))
+      : null;
+  const projectsByEnvironmentAndId = new Map(
+    archivedSnapshots.flatMap(({ environmentId, snapshot }) =>
+      snapshot.projects
+        .filter(
+          (project) =>
+            selectedProjectKeys === null ||
+            selectedProjectKeys.has(`${environmentId}:${project.id}`),
+        )
+        .map(
+          (project) => [`${environmentId}:${project.id}`, { ...project, environmentId }] as const,
+        ),
+    ),
+  );
+  const environmentLabels = new Map(
+    environments.map((environment) => {
+      const { primary, secondary } = settingsScopeEnvironmentLabels(environment, environments);
+      return [environment.environmentId, secondary ? `${primary} (${secondary})` : primary];
+    }),
+  );
+  const threads = archivedSnapshots.flatMap(({ environmentId, snapshot }) =>
+    snapshot.threads.map((thread) => ({
+      ...presentThreadShell(environmentId, thread),
+      environmentLabel: environmentLabels.get(environmentId) ?? environmentId,
+    })),
+  );
+  const hasMultipleEnvironments =
+    new Set(
+      threads
+        .filter((thread) =>
+          projectsByEnvironmentAndId.has(`${thread.environmentId}:${thread.projectId}`),
+        )
+        .map((thread) => thread.environmentId),
+    ).size > 1;
+  const logicalGroupsByProjectKey = new Map(
+    projectGroups.flatMap((group) =>
+      group.memberProjectRefs.map(
+        (member) => [`${member.environmentId}:${member.projectId}`, group] as const,
+      ),
+    ),
+  );
+
+  const archivedProjects = Array.from(projectsByEnvironmentAndId.values());
+  const groups = new Map<
+    string,
+    {
+      readonly project: (typeof archivedProjects)[number];
+      readonly title: string;
+      readonly threads: Array<(typeof threads)[number]>;
+    }
+  >();
+  for (const project of archivedProjects) {
+    const projectThreads: Array<(typeof threads)[number]> = [];
+    for (const thread of threads) {
+      if (thread.projectId === project.id && thread.environmentId === project.environmentId) {
+        projectThreads.push(thread);
+      }
+    }
+    if (projectThreads.length > 0) {
+      const physicalProjectKey = `${project.environmentId}:${project.id}` as const;
+      const logicalGroup = hasMultipleEnvironments
+        ? logicalGroupsByProjectKey.get(physicalProjectKey)
+        : undefined;
+      const groupKey = logicalGroup?.projectKey ?? physicalProjectKey;
+      const group = groups.get(groupKey);
+      if (group) {
+        group.threads.push(...projectThreads);
+      } else {
+        groups.set(groupKey, {
+          project,
+          title: logicalGroup?.displayName ?? project.title,
+          threads: projectThreads,
+        });
+      }
+    }
+  }
+  const sortedGroups = Array.from(groups, ([key, group]) => ({
+    ...group,
+    key,
+    threads: group.threads.toSorted((left, right) => {
+      const leftKey = left.archivedAt ?? left.createdAt;
+      const rightKey = right.archivedAt ?? right.createdAt;
+      return rightKey.localeCompare(leftKey) || right.id.localeCompare(left.id);
+    }),
+  }));
+  return { groups: sortedGroups, hasMultipleEnvironments };
+}
+
+// Its own hook, so React Compiler caches the grouping and typing a search does not redo it.
+function useArchivedThreadGroups() {
   const { scope, groups: projectGroups, environments } = useSettingsScope();
+  const archive = useArchivedThreadSnapshots(scope.environmentIds);
+  return {
+    ...archive,
+    ...groupArchivedThreads(archive.snapshots, scope, projectGroups, environments),
+  };
+}
+
+export function ArchivedThreadsPanel() {
   const { unarchiveThread, confirmAndDeleteThread } = useThreadActions();
   const pendingActionsRef = useRef(new Set<string>());
   const [pendingKeys, setPendingKeys] = useState<ReadonlySet<string>>(() => new Set());
   const [query, setQuery] = useState("");
   const {
-    snapshots: archivedSnapshots,
+    groups: archivedGroups,
+    hasMultipleEnvironments,
     error: archiveError,
     isLoading: isLoadingArchive,
     refresh: refreshArchivedThreads,
-  } = useArchivedThreadSnapshots(scope.environmentIds);
-
-  const { groups: archivedGroups, hasMultipleEnvironments } = (() => {
-    const selectedProjectKeys =
-      scope.kind === "project" || scope.kind === "checkout"
-        ? new Set(scope.members.map((member) => `${member.environmentId}:${member.id}`))
-        : null;
-    const projectsByEnvironmentAndId = new Map(
-      archivedSnapshots.flatMap(({ environmentId, snapshot }) =>
-        snapshot.projects
-          .filter(
-            (project) =>
-              selectedProjectKeys === null ||
-              selectedProjectKeys.has(`${environmentId}:${project.id}`),
-          )
-          .map(
-            (project) => [`${environmentId}:${project.id}`, { ...project, environmentId }] as const,
-          ),
-      ),
-    );
-    const environmentLabels = new Map(
-      environments.map((environment) => {
-        const { primary, secondary } = settingsScopeEnvironmentLabels(environment, environments);
-        return [environment.environmentId, secondary ? `${primary} (${secondary})` : primary];
-      }),
-    );
-    const threads = archivedSnapshots.flatMap(({ environmentId, snapshot }) =>
-      snapshot.threads.map((thread) => ({
-        ...presentThreadShell(environmentId, thread),
-        environmentLabel: environmentLabels.get(environmentId) ?? environmentId,
-      })),
-    );
-    const hasMultipleEnvironments =
-      new Set(
-        threads
-          .filter((thread) =>
-            projectsByEnvironmentAndId.has(`${thread.environmentId}:${thread.projectId}`),
-          )
-          .map((thread) => thread.environmentId),
-      ).size > 1;
-    const logicalGroupsByProjectKey = new Map(
-      projectGroups.flatMap((group) =>
-        group.memberProjectRefs.map(
-          (member) => [`${member.environmentId}:${member.projectId}`, group] as const,
-        ),
-      ),
-    );
-
-    const archivedProjects = Array.from(projectsByEnvironmentAndId.values());
-    const groups = new Map<
-      string,
-      {
-        readonly project: (typeof archivedProjects)[number];
-        readonly title: string;
-        readonly threads: Array<(typeof threads)[number]>;
-      }
-    >();
-    for (const project of archivedProjects) {
-      const projectThreads: Array<(typeof threads)[number]> = [];
-      for (const thread of threads) {
-        if (thread.projectId === project.id && thread.environmentId === project.environmentId) {
-          projectThreads.push(thread);
-        }
-      }
-      if (projectThreads.length > 0) {
-        const physicalProjectKey = `${project.environmentId}:${project.id}` as const;
-        const logicalGroup = hasMultipleEnvironments
-          ? logicalGroupsByProjectKey.get(physicalProjectKey)
-          : undefined;
-        const groupKey = logicalGroup?.projectKey ?? physicalProjectKey;
-        const group = groups.get(groupKey);
-        if (group) {
-          group.threads.push(...projectThreads);
-        } else {
-          groups.set(groupKey, {
-            project,
-            title: logicalGroup?.displayName ?? project.title,
-            threads: projectThreads,
-          });
-        }
-      }
-    }
-    const sortedGroups = Array.from(groups, ([key, group]) => ({
-      ...group,
-      key,
-      threads: group.threads.toSorted((left, right) => {
-        const leftKey = left.archivedAt ?? left.createdAt;
-        const rightKey = right.archivedAt ?? right.createdAt;
-        return rightKey.localeCompare(leftKey) || right.id.localeCompare(left.id);
-      }),
-    }));
-    return { groups: sortedGroups, hasMultipleEnvironments };
-  })();
+  } = useArchivedThreadGroups();
 
   const visibleGroups = filterArchivedThreadGroups(archivedGroups, query);
 
@@ -202,8 +219,11 @@ export function ArchivedThreadsPanel() {
             aria-label="Search archived threads"
             onChange={(event) => setQuery(event.currentTarget.value)}
             onKeyDown={(event) => {
+              if (event.nativeEvent.isComposing || event.keyCode === 229) return;
               if (event.key !== "Escape" || query.length === 0) return;
+              // Settings is a modal that closes on Escape; clearing the search should not close it.
               event.preventDefault();
+              event.stopPropagation();
               setQuery("");
             }}
             placeholder="Search archived threads"

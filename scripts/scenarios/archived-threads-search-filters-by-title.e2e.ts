@@ -6,7 +6,7 @@ import { runPromise, test, WEB } from "./t3.ts";
 test(
   "Settings Archived search narrows the list to matching threads",
   WEB,
-  async ({ t3, app, screen }) => {
+  async ({ t3, app, screen, browser }) => {
     const settings = await runPromise(approvalRequiredThreads);
     try {
       await runPromise(settings.apply);
@@ -40,6 +40,11 @@ test(
       await screen.getByRole("searchbox", "Search archived threads").fill("refund");
       await expect(screen.getByText("No matching archived threads")).toBeVisible();
       await app.screenshot("archived-search-no-match");
+
+      // Escape clears the search without closing Settings.
+      await browser.keyboard.press("Escape");
+      await expect(screen.getByRole("button", "Unarchive Add dark mode toggle")).toBeVisible();
+      await expect(screen.getByRole("searchbox", "Search archived threads")).toBeVisible();
     } finally {
       await runPromise(settings.restore);
     }
