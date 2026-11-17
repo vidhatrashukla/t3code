@@ -118,6 +118,8 @@ export function resolveNewThreadModelSelection(input: {
 }
 
 export const CHATGPT_USAGE_URL = "https://chatgpt.com/#settings/Usage";
+/** T3 stopped a turn because the plan was used up and Stop before paid usage is on. */
+export const PAID_USAGE_GUARD_CODE = "paid_usage_guard";
 export const CHATGPT_USAGE_LIMIT_CODE = "subscription_sharing_usage_limit_exceeded";
 /** A ChatGPT Business admin caps plan use in other apps; only the admin can raise it. */
 export const CHATGPT_WORKSPACE_USAGE_LIMIT_CODE =

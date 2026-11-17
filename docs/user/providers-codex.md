@@ -151,8 +151,8 @@ Codex continues on credits. To stop instead, turn on **Stop before paid usage** 
 the Codex instance in Settings > Providers. Changing it restarts that instance.
 
 With it on, T3 Code checks your Codex usage before each turn and does not send it
-when it would be billed to credits. The thread shows a usage-limit error with the
-reset time. If a turn is running when the plan runs out, T3 Code stops it. When
+when it would be billed to credits. The thread shows **Stopped before paid usage**
+with the reset time. If a turn is running when the plan runs out, T3 Code stops it. When
 Codex does not report your usage, for example with an API key, turns are sent as
 usual.
 

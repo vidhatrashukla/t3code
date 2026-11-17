@@ -9,6 +9,7 @@ import { limitRecoveryOwnsSnooze } from "@t3tools/client-runtime/state/thread-ex
 import {
   CHATGPT_USAGE_LIMIT_CODE,
   CHATGPT_WORKSPACE_USAGE_LIMIT_CODE,
+  PAID_USAGE_GUARD_CODE,
 } from "@t3tools/shared/usageLimits";
 import { GaugeIcon } from "lucide-react";
 import { useState } from "react";
@@ -64,13 +65,16 @@ export function usageLimitRecoveryBannerItem(props: RecoveryProps): ComposerBann
     ? `${resumes ? "Resumes" : "Resets"} ${formatUpcomingTimestamp(displayAt, timestampFormat)}`
     : "Reset time unavailable; retry manually";
   if (!chatGptLimit) {
+    const guarded = errorCode === PAID_USAGE_GUARD_CODE;
     return {
       id: `usage-limit-recovery:${runId}`,
       variant: "warning",
       group: "environment",
       icon: <GaugeIcon />,
-      title: "Usage limit reached",
-      description: resetDescription,
+      title: guarded ? "Stopped before paid usage" : "Usage limit reached",
+      description: guarded
+        ? `Plan usage is used up and Stop before paid usage is on. ${resetDescription}`
+        : resetDescription,
       actions: recoveryActions,
     };
   }

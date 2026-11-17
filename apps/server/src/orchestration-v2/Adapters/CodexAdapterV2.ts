@@ -22,6 +22,7 @@ import {
   codexAppServerEnvironment,
   codexDefaultReasoningEffortOverride,
 } from "../../provider/CodexProvider.ts";
+import { PAID_USAGE_GUARD_CODE } from "@t3tools/shared/usageLimits";
 import {
   CODEX_PAID_USAGE_GUARD_MESSAGE,
   codexRateLimitsMayBeExhausted,
@@ -4997,7 +4998,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             driver: CODEX_PROVIDER,
             failure: makeProviderFailure({
               class: "usage_limit",
-              code: "paid_usage_guard",
+              code: PAID_USAGE_GUARD_CODE,
               message: CODEX_PAID_USAGE_GUARD_MESSAGE,
               retryable: false,
               resetAt: codexUsageLimitResetAt(yield* Ref.get(rateLimitSnapshot)),

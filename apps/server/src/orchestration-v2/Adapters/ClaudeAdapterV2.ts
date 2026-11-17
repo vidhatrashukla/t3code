@@ -208,6 +208,7 @@ import {
   shouldPersistProviderEvent,
 } from "../../provider/EventNdjsonLogger.ts";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
+import { PAID_USAGE_GUARD_CODE } from "@t3tools/shared/usageLimits";
 import {
   CLAUDE_PAID_USAGE_GUARD_MESSAGE,
   claudeRateLimitEventToUpdate,
@@ -5811,7 +5812,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         const paidUsageFailure = (resetAt: string | null) =>
           makeProviderFailure({
             class: "usage_limit",
-            code: "paid_usage_guard",
+            code: PAID_USAGE_GUARD_CODE,
             message: CLAUDE_PAID_USAGE_GUARD_MESSAGE,
             retryable: false,
             resetAt,

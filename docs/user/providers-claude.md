@@ -96,7 +96,7 @@ out and bills extra usage. To stop instead, turn on **Stop before paid usage** f
 the Claude instance in Settings > Providers. Changing it restarts that instance.
 
 With it on, a turn stops as soon as Claude reports that it is using extra usage,
-and the thread shows a usage-limit error with the reset time. Until that window
+and the thread shows **Stopped before paid usage** with the reset time. Until that window
 resets, T3 Code does not send new turns on this instance. Claude reports this with
 its reply, so a turn can use a small amount of extra usage before it stops. To
 cap extra usage itself, set a limit or turn it off in Claude's Settings > Usage.
